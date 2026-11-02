@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "CommonJS",
+    "allowJs": true,
+    "checkJs": false,
+    "moduleResolution": "node"
+  },
+  "include": ["plugin/src/**/*.js"],
+  "exclude": ["sdk", "dist", "plugin/.fushi-dev"]
+}

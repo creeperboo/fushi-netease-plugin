@@ -1,0 +1,22 @@
+# Official SDK, fetched locally for validation only
+sdk/
+.tmp-hibiki/
+
+# Build output
+dist/
+*.fushiplug
+
+# SDK dev state and signing keys
+plugin/.fushi-dev/
+*.pem
+*.key
+
+# Scratch files
+tmp/
+node_modules/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

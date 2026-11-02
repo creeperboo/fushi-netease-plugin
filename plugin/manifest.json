@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "io.github.creeperboo.fushi.netease",
+  "name": "网易云音乐",
+  "version": "0.1.4",
+  "api": 1,
+  "entry": "src/index.js",
+  "author": "creep",
+  "description": "网易云音乐非官方音源插件：搜索、歌单、艺人、MV、歌词与扫码登录。",
+  "capabilities": [
+    "search",
+    "searchBest",
+    "album",
+    "playlist",
+    "artist",
+    "artistAlbums",
+    "artistMvs",
+    "mvStream",
+    "stream",
+    "lyrics",
+    "lyricsSearch",
+    "lyricsFetch",
+    "home",
+    "library",
+    "like",
+    "account",
+    "login"
+  ],
+  "searchTypes": ["song", "album", "artist", "playlist"],
+  "permissions": ["network", "storage", "credentials", "webAuth", "insecureHttp"],
+  "network": {
+    "domains": [
+      "music.163.com",
+      "*.music.126.net",
+      "*.vod.126.net",
+      "vod.126.net"
+    ],
+    "methods": ["GET", "POST"]
+  }
+}
