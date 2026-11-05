@@ -353,6 +353,8 @@ module.exports = {
   assertOk,
   isLoggedOut,
   csrfToken,
+  ensureLoaded,
+  cookieHeader,
   mediaHeaders,
   setLoginCookie,
   hasLoginCookie,

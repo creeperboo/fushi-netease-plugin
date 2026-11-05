@@ -2,6 +2,7 @@
 
 const { TTL, cacheGet, cacheSet } = require('./state.js');
 const net = require('./net.js');
+const eapiClient = require('./eapi.js');
 const auth = require('./auth.js');
 const { str, sid } = require('./map.js');
 
@@ -59,8 +60,15 @@ function expiry(expi) {
   return Date.now() + Math.round(n * 1000);
 }
 
+function secureMediaUrl(url) {
+  return String(url).replace(
+    /^http:\/\/([a-z0-9-]+\.(?:music|vod)\.126\.net\/)/i,
+    'https://$1',
+  );
+}
+
 function streamResult(d) {
-  const out = { url: d.url, headers: net.mediaHeaders() };
+  const out = { url: secureMediaUrl(d.url), headers: net.mediaHeaders() };
   const exp = expiry(d.expi);
   if (exp) out.expiresAt = exp;
   const codec = str(d.type) || str(d.encodeType);
@@ -82,6 +90,16 @@ async function legacyUrl(id, quality) {
   return firstData(res.json);
 }
 
+async function eapiUrl(id, quality) {
+  const q = QUALITY[quality];
+  const json = await eapiClient.eapi('song/enhance/player/url/v1', {
+    ids: JSON.stringify([Number(id)]),
+    level: q.level,
+    encodeType: q.encode,
+  }, { what: '取流' });
+  return firstData(json);
+}
+
 async function v1Url(id, quality) {
   const q = QUALITY[quality];
   const res = await net.plainOrWeapi('/api/song/enhance/player/url/v1', {
@@ -95,7 +113,7 @@ async function v1Url(id, quality) {
 
 async function tryQuality(id, quality) {
   const result = { candidate: null, sawTrial: false, needsVip: false, paidAlbum: false, lastError: null };
-  for (const fetchUrl of [legacyUrl, v1Url]) {
+  for (const fetchUrl of [eapiUrl, legacyUrl, v1Url]) {
     try {
       const d = await fetchUrl(id, quality);
       if (trial(d)) result.sawTrial = true;
@@ -157,9 +175,15 @@ async function stream(args) {
 }
 
 async function mvRequest(id, r) {
-  const res = await net.plainOrWeapi('/api/song/enhance/play/mv/url', { id: Number(id), r });
-  net.assertOk(res.json, 'MV 取流');
-  return firstData(res.json);
+  try {
+    const json = await eapiClient.eapi('song/enhance/play/mv/url', { id: Number(id), r }, { what: 'MV 取流' });
+    return firstData(json);
+  } catch (e) {
+    console.warn('eapi MV 取流失败，回退 plain：' + e.message);
+    const res = await net.plainOrWeapi('/api/song/enhance/play/mv/url', { id: Number(id), r });
+    net.assertOk(res.json, 'MV 取流');
+    return firstData(res.json);
+  }
 }
 
 async function mvStream(args) {
@@ -183,7 +207,7 @@ async function mvStream(args) {
   }
   if (!candidate) throw new net.ApiError('MV 暂不可播放（可能受版权或地区限制）');
 
-  const out = { url: candidate.url, headers: net.mediaHeaders() };
+  const out = { url: secureMediaUrl(candidate.url), headers: net.mediaHeaders() };
   const exp = expiry(candidate.expi);
   if (exp) out.expiresAt = exp;
   const w = Number(candidate.width);

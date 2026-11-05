@@ -2,6 +2,7 @@
 
 const { TTL, LIMITS, cacheGet, cacheSet } = require('./state.js');
 const net = require('./net.js');
+const eapiClient = require('./eapi.js');
 const { str, sid } = require('./map.js');
 const browse = require('./browse.js');
 
@@ -53,13 +54,18 @@ function getLrc(obj, v1) {
 }
 
 async function classicRaw(id) {
-  const res = await net.plain('/api/song/lyric', { id, lv: -1, kv: -1, tv: -1, rv: -1 });
-  net.assertOk(res.json, '歌词');
-  return res.json;
+  try {
+    return await eapiClient.eapi('song/lyric', { id, lv: -1, kv: -1, tv: -1, rv: -1 }, { what: '歌词' });
+  } catch (e) {
+    console.warn('eapi 歌词接口失败，回退 plain：' + e.message);
+    const res = await net.plain('/api/song/lyric', { id, lv: -1, kv: -1, tv: -1, rv: -1 });
+    net.assertOk(res.json, '歌词');
+    return res.json;
+  }
 }
 
 async function v1Raw(id) {
-  const res = await net.plainOrWeapi('/api/song/lyric/v1', {
+  const data = {
     id: Number(id),
     cp: false,
     lv: 0,
@@ -69,9 +75,15 @@ async function v1Raw(id) {
     yv: 0,
     ytv: 0,
     yrv: 0,
-  });
-  net.assertOk(res.json, '逐字歌词');
-  return res.json;
+  };
+  try {
+    return await eapiClient.eapi('song/lyric/v1', data, { what: '逐字歌词' });
+  } catch (e) {
+    console.warn('eapi 逐字歌词接口失败，回退 plain：' + e.message);
+    const res = await net.plainOrWeapi('/api/song/lyric/v1', data);
+    net.assertOk(res.json, '逐字歌词');
+    return res.json;
+  }
 }
 
 function pickRomanization(v1) {

@@ -4,7 +4,7 @@
 播放取流、歌词、首页推荐、用户歌单、喜欢和登录能力。
 
 - 插件 ID：`io.github.creeperboo.fushi.netease`
-- 版本：`0.1.4`
+- 版本：`0.1.5`
 - 源码：[github.com/creeperboo/fushi-netease-plugin](https://github.com/creeperboo/fushi-netease-plugin)
 - 下载：[最新 Release](https://github.com/creeperboo/fushi-netease-plugin/releases/latest)
 - 插件 API：`1`
@@ -21,12 +21,21 @@
 | 取流 | 标准 / 高 / 无损 / Hi-Res；不返回试听片段 |
 | 歌词 | 行级 LRC 或逐字 YRC；只返回原文，不返回翻译 |
 | 歌词搜索 | 为本地或第三方曲目按标题、艺人、时长查找歌词 |
-| 首页 | 每日推荐（登录后）、推荐歌单、新歌速递、排行榜 |
+| 首页 | 每日推荐、每日推荐歌单（登录后）、推荐歌单、新歌速递、排行榜 |
 | 用户歌单 | 登录后读取自己的和收藏的歌单，「我喜欢」排第一 |
 | 喜欢 | 读取与切换平台“喜欢”状态 |
-| 登录 | 网易云 App 扫码、Fushi 内网页登录，或粘贴浏览器 Cookie |
+| 登录 | 扫码、Fushi 内网页登录、手机号验证码，或粘贴浏览器 Cookie |
 
 ## 变更记录
+
+### 0.1.5
+
+- 改用网易云客户端 eapi（`interface.music.163.com`）并持久化 deviceId；扫码改为 `type=1`，
+  与可正常扫码的社区插件对齐。
+- 新增手机号验证码登录；账号/VIP 改为 eapi 查询，支持黑胶 SVIP / 黑胶 VIP / 音乐包 badge。
+- 新增每日推荐歌单、官方综合搜索最佳匹配、专辑/艺人/首页歌曲详情回填、喜欢走 eapi、
+  喜欢歌单封面补齐。
+- 媒体地址统一 https，移除 `insecureHttp` 权限；保留质量降级和无翻译歌词。
 
 ### 0.1.4
 
@@ -125,8 +134,8 @@ node ../sdk/fushi-plugin.mjs login .
 
 ```bash
 mkdir -p dist
-node sdk/fushi-plugin.mjs pack plugin --out "dist/io.github.creeperboo.fushi.netease-0.1.4.fushiplug"
-node sdk/fushi-plugin.mjs inspect "dist/io.github.creeperboo.fushi.netease-0.1.4.fushiplug"
+node sdk/fushi-plugin.mjs pack plugin --out "dist/io.github.creeperboo.fushi.netease-0.1.5.fushiplug"
+node sdk/fushi-plugin.mjs inspect "dist/io.github.creeperboo.fushi.netease-0.1.5.fushiplug"
 ```
 
 `pack` 会生成 `files.json` 并校验包结构。如需 Ed25519 签名，可先执行
@@ -143,11 +152,12 @@ node sdk/fushi-plugin.mjs inspect "dist/io.github.creeperboo.fushi.netease-0.1.4
 
 ## 登录
 
-插件提供三种方式：
+插件提供四种方式：
 
 - **扫码登录**：宿主显示二维码，用网易云音乐 App 扫码并在手机上确认。
 - **网页登录**：宿主用内嵌浏览器打开网易云登录页，登录后自动捕获 `MUSIC_U`；需要
   `webAuth` 权限。
+- **手机号验证码**：填写手机号和短信验证码；可能触发网易云安全验证。
 - **粘贴 Cookie**：从浏览器开发者工具复制 `music.163.com` 的 Cookie，至少包含
   `MUSIC_U` 或 `MUSIC_A`。
 
@@ -162,12 +172,12 @@ Cookie 放进媒体请求头、日志或结果。退出登录会删除本地凭�
 | `storage` | 缓存匿名 Cookie 罐 |
 | `credentials` | 加密保存登录 Cookie |
 | `webAuth` | 在 Fushi 内嵌浏览器完成网易云网页登录并接收 Cookie |
-| `insecureHttp` | 网易云封面和部分音频地址使用 `http://` |
 
 域名清单：
 
-- `music.163.com`：网页 API
-- `*.music.126.net` / `*.vod.126.net`：封面、歌曲音频、MV
+- `music.163.com`：网页 API / 登录页
+- `interface.music.163.com`：客户端 eapi
+- `*.music.126.net` / `*.vod.126.net`：封面、歌曲音频、MV（https）
 - `vod.126.net`：裸域兜底
 
 `*.host` 只匹配子域；所有封面、音频、MV 和重定向目标都必须命中清单，否则宿主会
@@ -202,9 +212,9 @@ Cookie 放进媒体请求头、日志或结果。退出登录会删除本地凭�
 | `check` 报清单/导出错误 | 确认 17 个能力都已导出，且 `manifest.capabilities` 一致 |
 | 接口返回 `-460` / `400` | 网易云风控或加密校验失败；插件会先在 plain/weapi 间回退，仍失败请稍后重试 |
 | 登录后仍显示未登录 | Cookie 可能过期；退出后重新扫码或粘贴新的 `MUSIC_U` |
-| 账号行没有 VIP badge | 0.1.4 起会兼容网页账号的 `vipType=110`；升级后重新打开账号行，仍无 badge 请反馈 |
+| 账号行没有 VIP badge | 0.1.5 起用 eapi 查询 SVIP/黑胶/音乐包，并兼容 `vipType=110`；升级后重新打开账号行，仍无 badge 请反馈 |
 | 很多 VIP 曲目灰色 | 确认账号行有「黑胶 VIP」或「音乐包」；登录后需要重新搜索/刷新，旧搜索页可能保留登录前的不可播标记 |
-| 扫码后提示 `8821` | 网易云拒绝了这次扫码授权。刷新二维码后立即在手机上确认；仍失败请改用「网页登录」或「粘贴 Cookie」 |
+| 扫码后提示 `8821` | 网易云拒绝了这次扫码授权。刷新二维码后立即在手机上确认；仍失败请改用「网页登录」「手机号验证码」或「粘贴 Cookie」 |
 | 旧歌曲仍有翻译 | 0.1.1 之前的歌词缓存可能保留约 1 天；换未播放曲目、等待过期或清除插件歌词来源缓存后重开 |
 | 封面不显示 / 无法播放 | 媒体主机可能不在域名清单；用 `run ... --trace` 核对实际主机 |
 | 安装被拒 | 用 `inspect` 查看具体原因；确认宿主是 develop 版且 API 为 1 |

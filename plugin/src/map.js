@@ -22,9 +22,9 @@ function nonNegInt(v) {
 function absUrl(v) {
   const s = str(v);
   if (!s) return undefined;
-  if (s.indexOf('//') === 0) return 'https:' + s;
-  if (/^https?:\/\//i.test(s)) return s;
-  return undefined;
+  const absolute = s.indexOf('//') === 0 ? 'https:' + s : s;
+  if (!/^https?:\/\//i.test(absolute)) return undefined;
+  return absolute.replace(/^http:\/\/([a-z0-9-]+\.(?:music|vod)\.126\.net\/)/i, 'https://$1');
 }
 
 function day(ms) {

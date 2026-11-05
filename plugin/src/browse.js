@@ -2,6 +2,7 @@
 
 const { TTL, LIMITS, cacheGet, cacheSet } = require('./state.js');
 const net = require('./net.js');
+const eapiClient = require('./eapi.js');
 const auth = require('./auth.js');
 const {
   str, sid, privilegeMapOf, mapTrack, mapTracks, mapAlbum, mapArtist, mapMv, mapPlaylist,
@@ -21,6 +22,16 @@ function pageArgs(page, pageSize, maxSize) {
   const pg = Number.isFinite(p) && p > 0 ? Math.floor(p) : 0;
   const size = Math.max(1, Math.min(maxSize, Number.isFinite(s) && s > 0 ? Math.floor(s) : 10));
   return { page: pg, size, offset: pg * size };
+}
+
+async function eapiJson(path, data, what) {
+  try {
+    return await eapiClient.eapi(path, data, { what });
+  } catch (e) {
+    console.warn(`eapi ${what || path} 失败，回退 plain：` + e.message);
+    const res = await net.plainOrWeapi('/api/' + path, data);
+    return net.assertOk(res.json, what);
+  }
 }
 
 async function vipState() {
@@ -59,15 +70,14 @@ async function search(args) {
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  const res = await net.plainOrWeapi('/api/cloudsearch/pc', {
+  const json = await eapiJson('cloudsearch/pc', {
     s: query,
     type: SEARCH_TYPES[type],
     limit: size,
     offset,
     total: true,
-  });
-  net.assertOk(res.json, '搜索');
-  const result = (res.json && res.json.result) || {};
+  }, '搜索');
+  const result = (json && json.result) || {};
   let rawItems = [];
   let count = 0;
   if (type === 'song') {
@@ -100,9 +110,57 @@ async function search(args) {
   return page;
 }
 
+async function complexBest(query) {
+  try {
+    const json = await eapiJson('search/complex/get', {
+      keyword: query,
+      scene: 'normal',
+      limit: 10,
+      offset: 0,
+    }, '综合搜索');
+    const rules = (json.trp && json.trp.rules) || [];
+    const ids = {};
+    for (const rule of rules) {
+      const m = /^search_block_best_match\|(artist|playlist|album)::(\d+)/.exec(String(rule));
+      if (m && !ids[m[1]]) ids[m[1]] = m[2];
+    }
+    if (!Object.keys(ids).length) return null;
+    const complete = (json.data && json.data.complete) || {};
+    const find = (list, id) => (list || []).find((x) => x && String(x.id) === String(id));
+    const out = {};
+    if (ids.artist) {
+      let raw = find(complete.artist && complete.artist.artists, ids.artist);
+      if (!raw) {
+        raw = (await eapiJson('v1/artist/' + ids.artist, {}, '最佳匹配艺人').catch(() => null) || {}).artist;
+      }
+      if (raw) out.artist = mapArtist(raw);
+    }
+    if (ids.playlist) {
+      let raw = find(complete.playList && complete.playList.playLists, ids.playlist);
+      if (!raw) {
+        raw = (await eapiJson('v6/playlist/detail', { id: ids.playlist, n: 0, s: 0 }, '最佳匹配歌单').catch(() => null) || {}).playlist;
+      }
+      if (raw) out.playlist = mapPlaylist(raw);
+    }
+    if (ids.album) {
+      let raw = find(complete.album && complete.album.albums, ids.album);
+      if (!raw) {
+        raw = (await eapiJson('v1/album/' + ids.album, {}, '最佳匹配专辑').catch(() => null) || {}).album;
+      }
+      if (raw) out.album = mapAlbum(raw);
+    }
+    return Object.keys(out).length ? out : null;
+  } catch (e) {
+    console.warn('官方最佳匹配失败，使用本地评分：' + e.message);
+    return null;
+  }
+}
+
 async function searchBest(args) {
   const query = str(args.query);
   if (!query) return null;
+  const official = await complexBest(query);
+  if (official) return official;
   const q = normalizeName(query);
   if (!q) return null;
   const safe = (type) => search({ query, type, page: 0, pageSize: 5 }).catch(() => null);
@@ -150,19 +208,27 @@ async function albumDetail(id, state) {
   const cacheKey = `browse:album:${id}:${vs.vip ? 1 : 0}:${vs.known ? 1 : 0}`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
-  const res = await net.plainOrWeapi('/api/v1/album/' + encodeURIComponent(id), {});
-  net.assertOk(res.json, '专辑');
-  const raw = res.json && res.json.album;
+  const json = await eapiJson('v1/album/' + encodeURIComponent(id), {}, '专辑');
+  const raw = json && json.album;
   if (!raw) throw new net.ApiError('专辑不存在或已下架');
   const album = mapAlbum(raw);
   if (!album) throw new net.ApiError('专辑数据不完整');
-  const map = privilegeMapOf(res.json.privileges);
-  const tracks = mapTracks(res.json.songs, {
-    privileges: map,
-    vip: vs.vip,
-    vipKnown: vs.known,
-    markPlayable: true,
-  });
+  const ids = (Array.isArray(json.songs) ? json.songs : [])
+    .map((x) => (x && x.id !== undefined ? String(x.id) : ''))
+    .filter(Boolean);
+  let tracks = [];
+  if (ids.length) {
+    const detail = await fetchSongDetails(ids, vs);
+    tracks = ids.map((tid) => detail.byId[tid]).filter(Boolean);
+  }
+  if (!tracks.length) {
+    tracks = mapTracks(json.songs, {
+      privileges: privilegeMapOf(json.privileges),
+      vip: vs.vip,
+      vipKnown: vs.known,
+      markPlayable: true,
+    });
+  }
   const out = { album, tracks };
   cacheSet(cacheKey, out, TTL.browse);
   return out;
@@ -178,13 +244,12 @@ async function fetchSongDetails(ids, state) {
   const privileges = Object.create(null);
   for (let i = 0; i < ids.length; i += LIMITS.detailChunk) {
     const chunk = ids.slice(i, i + LIMITS.detailChunk);
-    const res = await net.plainOrWeapi('/api/v3/song/detail', {
+    const json = await eapiJson('v3/song/detail', {
       c: JSON.stringify(chunk.map((id) => ({ id: Number(id) }))),
-    });
-    net.assertOk(res.json, '歌曲详情');
-    const priv = privilegeMapOf(res.json.privileges);
+    }, '歌曲详情');
+    const priv = privilegeMapOf(json.privileges);
     for (const key of Object.keys(priv)) privileges[key] = priv[key];
-    for (const raw of Array.isArray(res.json.songs) ? res.json.songs : []) {
+    for (const raw of Array.isArray(json.songs) ? json.songs : []) {
       const track = mapTrack(raw, {
         privileges,
         vip: state.vip,
@@ -206,9 +271,8 @@ async function playlist(args) {
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  const res = await net.plain('/api/v6/playlist/detail', { id, n: 0, s: 8 });
-  net.assertOk(res.json, '歌单');
-  const raw = res.json && res.json.playlist;
+  const json = await eapiJson('v6/playlist/detail', { id, n: 0, s: 0 }, '歌单');
+  const raw = json && json.playlist;
   if (!raw) throw new net.ApiError('歌单不存在或已下架');
 
   const order = [];
@@ -225,7 +289,7 @@ async function playlist(args) {
   }
 
   let tracks = [];
-  let privMap = privilegeMapOf(res.json.privileges);
+  let privMap = privilegeMapOf(json.privileges);
   if (order.length) {
     try {
       const detail = await fetchSongDetails(order, vs);
@@ -258,12 +322,37 @@ async function artist(args) {
   const cacheKey = `browse:artist:${id}:${vs.vip ? 1 : 0}:${vs.known ? 1 : 0}`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
-  const res = await net.plain('/api/v1/artist/' + encodeURIComponent(id), {});
-  net.assertOk(res.json, '艺人');
-  const info = mapArtist(res.json && res.json.artist);
+  const [json, intro, fans] = await Promise.all([
+    eapiJson('v1/artist/' + encodeURIComponent(id), {}, '艺人'),
+    eapiJson('artist/introduction', { id }, '艺人介绍').catch(() => null),
+    eapiJson('artist/follow/count/get', { id }, '粉丝数').catch(() => null),
+  ]);
+  const info = mapArtist(json && json.artist);
   if (!info) throw new net.ApiError('艺人不存在');
-  const hot = Array.isArray(res.json.hotSongs) ? res.json.hotSongs.slice(0, 50) : [];
-  const tracks = mapTracks(hot, { vip: vs.vip, vipKnown: vs.known, markPlayable: true });
+  const fanCount = fans && fans.data && Number(fans.data.fansCnt);
+  if (Number.isFinite(fanCount) && fanCount >= 0) {
+    info.stats = Object.assign({}, info.stats, { fanCount });
+  }
+  const sections = ((intro && intro.introduction) || [])
+    .map((x) => ({ title: str(x && x.ti), text: str(x && x.txt) }))
+    .filter((x) => x.text);
+  let description = str(intro && intro.briefDesc) || str(json.artist && json.artist.briefDesc);
+  if (sections.length && !sections[0].title) description = sections.shift().text;
+  if (description) info.description = description;
+  if (sections.length) info.intro = sections.slice(0, 20).map((x) => (x.title ? x : { text: x.text }));
+  const hot = Array.isArray(json.hotSongs) ? json.hotSongs.slice(0, 50) : [];
+  let tracks = [];
+  if (hot.length) {
+    try {
+      const detail = await fetchSongDetails(hot.map((x) => String(x.id)), vs);
+      tracks = hot.map((x) => detail.byId[String(x.id)]).filter(Boolean);
+    } catch (e) {
+      console.warn('艺人热门曲详情获取失败：' + e.message);
+    }
+  }
+  if (!tracks.length) {
+    tracks = mapTracks(hot, { vip: vs.vip, vipKnown: vs.known, markPlayable: true });
+  }
   const out = { artist: info, tracks };
   cacheSet(cacheKey, out, TTL.browse);
   return out;
@@ -275,15 +364,14 @@ async function artistAlbums(args) {
   const cacheKey = `browse:artistAlbums:${id}:${offset}:${size}`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
-  const res = await net.plainOrWeapi('/api/artist/albums/' + encodeURIComponent(id), {
+  const json = await eapiJson('artist/albums/' + encodeURIComponent(id), {
     limit: size,
     offset,
     total: true,
-  });
-  net.assertOk(res.json, '艺人专辑');
-  const list = Array.isArray(res.json.hotAlbums) ? res.json.hotAlbums : [];
+  }, '艺人专辑');
+  const list = Array.isArray(json.hotAlbums) ? json.hotAlbums : [];
   const items = list.map((x) => mapAlbum(x)).filter(Boolean);
-  const page = { items, hasMore: !!res.json.more };
+  const page = { items, hasMore: !!json.more };
   cacheSet(cacheKey, page, TTL.browse);
   return page;
 }
@@ -294,16 +382,15 @@ async function artistMvs(args) {
   const cacheKey = `browse:artistMvs:${id}:${offset}:${size}`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
-  const res = await net.plainOrWeapi('/api/artist/mvs', {
+  const json = await eapiJson('artist/mvs', {
     artistId: id,
     limit: size,
     offset,
     total: true,
-  });
-  net.assertOk(res.json, '艺人 MV');
-  const list = Array.isArray(res.json.mvs) ? res.json.mvs : [];
+  }, '艺人 MV');
+  const list = Array.isArray(json.mvs) ? json.mvs : [];
   const items = list.map((x) => mapMv(x)).filter(Boolean);
-  const page = { items, hasMore: !!res.json.hasMore };
+  const page = { items, hasMore: !!json.hasMore };
   cacheSet(cacheKey, page, TTL.browse);
   return page;
 }

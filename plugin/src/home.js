@@ -2,8 +2,9 @@
 
 const { TTL, cacheGet, cacheSet, cacheDel } = require('./state.js');
 const net = require('./net.js');
+const eapiClient = require('./eapi.js');
 const auth = require('./auth.js');
-const { mapTracks, mapPlaylist, sid } = require('./map.js');
+const { mapTracks, mapPlaylist, sid, privilegeMapOf, mapTrack } = require('./map.js');
 
 function pageArgs(page, pageSize) {
   const p = Number(page);
@@ -18,33 +19,69 @@ function section(id, title, kind, items) {
   return { id, title, kind, items };
 }
 
+async function eapiJson(path, data, what) {
+  try {
+    return await eapiClient.eapi(path, data, { what });
+  } catch (e) {
+    console.warn(`eapi ${what || path} 失败，回退 plain：` + e.message);
+    const res = await net.plainOrWeapi('/api/' + path, data);
+    return net.assertOk(res.json, what);
+  }
+}
+
+async function detailTracks(list, vip, vipKnown) {
+  const ids = (list || []).map((x) => (x && x.id !== undefined ? String(x.id) : '')).filter(Boolean);
+  if (ids.length) {
+    try {
+      const json = await eapiJson('v3/song/detail', {
+        c: JSON.stringify(ids.map((id) => ({ id: Number(id) }))),
+      }, '歌曲详情');
+      const privileges = privilegeMapOf(json.privileges);
+      const byId = Object.create(null);
+      for (const raw of Array.isArray(json.songs) ? json.songs : []) {
+        const track = mapTrack(raw, { privileges, vip, vipKnown, markPlayable: true });
+        if (track) byId[track.id] = track;
+      }
+      const out = ids.map((id) => byId[id]).filter(Boolean);
+      if (out.length) return out;
+    } catch (e) {
+      console.warn('首页歌曲详情获取失败：' + e.message);
+    }
+  }
+  return mapTracks(list, { vip, vipKnown, markPlayable: true });
+}
+
 async function dailySection(vip, vipKnown) {
-  const res = await net.plainOrWeapi('/api/v3/discovery/recommend/songs', {});
-  net.assertOk(res.json, '每日推荐');
-  const data = res.json && res.json.data;
+  const json = await eapiJson('v3/discovery/recommend/songs', {}, '每日推荐');
+  const data = json && json.data;
   const list = data && Array.isArray(data.dailySongs) ? data.dailySongs.slice(0, 50) : [];
-  return section('daily', '每日推荐', 'tracks', mapTracks(list, { vip, vipKnown, markPlayable: true }));
+  return section('daily', '每日推荐', 'tracks', await detailTracks(list, vip, vipKnown));
+}
+
+async function dailyPlaylistsSection() {
+  const json = await eapiJson('v1/discovery/recommend/resource', {}, '每日推荐歌单');
+  const list = Array.isArray(json && json.recommend) ? json.recommend.slice(0, 50) : [];
+  return section('daily-playlists', '每日推荐歌单', 'playlists', list.map((x) => mapPlaylist(x)).filter(Boolean));
 }
 
 async function recommendPlaylists() {
-  const res = await net.plainOrWeapi('/api/personalized/playlist', { limit: 12 });
-  net.assertOk(res.json, '推荐歌单');
-  const list = Array.isArray(res.json && res.json.result) ? res.json.result.slice(0, 12) : [];
+  const json = await eapiJson('personalized/playlist', { limit: 12, total: true, n: 1000 }, '推荐歌单');
+  const list = Array.isArray(json && json.result) ? json.result.slice(0, 12) : [];
   return section('recommend-playlists', '推荐歌单', 'playlists', list.map((x) => mapPlaylist(x)).filter(Boolean));
 }
 
 async function newSongs(vip, vipKnown) {
-  const res = await net.plainOrWeapi('/api/personalized/newsong', { type: 'recommend', limit: 12 });
-  net.assertOk(res.json, '新歌速递');
-  const list = Array.isArray(res.json && res.json.result) ? res.json.result.slice(0, 12) : [];
-  const raws = list.map((x) => (x && typeof x === 'object' && x.song && typeof x.song === 'object' ? x.song : x));
-  return section('new-songs', '新歌速递', 'tracks', mapTracks(raws, { vip, vipKnown, markPlayable: true }));
+  const json = await eapiJson('personalized/newsong', { type: 'recommend', limit: 30, areaId: 0 }, '新歌速递');
+  const list = Array.isArray(json && json.result) ? json.result.slice(0, 30) : [];
+  const raws = list
+    .map((x) => (x && typeof x === 'object' && x.song && typeof x.song === 'object' ? x.song : x))
+    .filter(Boolean);
+  return section('new-songs', '新歌速递', 'tracks', await detailTracks(raws, vip, vipKnown));
 }
 
 async function toplists(vip, vipKnown) {
-  const res = await net.plainOrWeapi('/api/toplist/detail', {});
-  net.assertOk(res.json, '排行榜');
-  const list = Array.isArray(res.json && res.json.list) ? res.json.list.slice(0, 6) : [];
+  const json = await eapiJson('toplist/detail', {}, '排行榜');
+  const list = Array.isArray(json && json.list) ? json.list.slice(0, 6) : [];
   const items = list
     .map((x) =>
       mapPlaylist(x, {
@@ -69,7 +106,7 @@ async function home(args) {
   if (cached) return cached;
 
   const tasks = [];
-  if (loggedIn) tasks.push(dailySection(vip, vipKnown));
+  if (loggedIn) tasks.push(dailySection(vip, vipKnown), dailyPlaylistsSection());
   tasks.push(recommendPlaylists(), newSongs(vip, vipKnown), toplists(vip, vipKnown));
   const results = await Promise.all(
     tasks.map((p) =>
@@ -85,14 +122,37 @@ async function home(args) {
 }
 
 async function userPlaylistsRaw(uid, limit, offset) {
-  const res = await net.plainOrWeapi('/api/user/playlist', {
+  return eapiJson('user/playlist', {
     uid,
     limit,
     offset,
     includeVideo: true,
-  });
-  net.assertOk(res.json, '用户歌单');
-  return res.json;
+  }, '用户歌单');
+}
+
+async function fillLikedCover(playlist, uid, ids) {
+  if (!playlist || playlist.coverUrl) return playlist;
+  let first = ids && ids[0];
+  if (!first) {
+    try {
+      const json = await eapiJson('song/like/get', { uid }, '喜欢列表');
+      first = Array.isArray(json.ids) ? json.ids[0] : null;
+    } catch (e) {
+      return playlist;
+    }
+  }
+  if (!first) return playlist;
+  try {
+    const json = await eapiJson('v3/song/detail', {
+      c: JSON.stringify([{ id: Number(first) }]),
+    }, '喜欢曲封面');
+    const raw = Array.isArray(json.songs) ? json.songs[0] : null;
+    const track = raw ? mapTrack(raw) : null;
+    if (track && track.coverUrl) playlist.coverUrl = track.coverUrl;
+  } catch (e) {
+    console.warn('喜欢歌单封面获取失败：' + e.message);
+  }
+  return playlist;
 }
 
 async function library(args) {
@@ -110,6 +170,8 @@ async function library(args) {
       const first = pairs.splice(at, 1)[0];
       pairs.unshift(first);
     }
+    const likedPair = pairs.find((x) => x.raw && x.raw.specialType === 5);
+    if (likedPair) await fillLikedCover(likedPair.item, session.uid);
   }
   return {
     items: pairs.map((x) => x.item),
@@ -138,9 +200,8 @@ async function likeList() {
 
   let ids = [];
   try {
-    const res = await net.plain('/api/song/like/get', { uid: session.uid });
-    net.assertOk(res.json, '喜欢列表');
-    const raw = Array.isArray(res.json && res.json.ids) ? res.json.ids : [];
+    const json = await eapiJson('song/like/get', { uid: session.uid }, '喜欢列表');
+    const raw = Array.isArray(json && json.ids) ? json.ids : [];
     ids = raw.map((x) => sid(x)).filter(Boolean);
   } catch (e) {
     console.warn('读取喜欢列表失败：' + e.message);
@@ -148,15 +209,17 @@ async function likeList() {
   }
   const out = { ids };
   const playlist = await likedPlaylist(session.uid);
-  if (playlist) out.playlist = playlist;
+  if (playlist) {
+    await fillLikedCover(playlist, session.uid, ids);
+    out.playlist = playlist;
+  }
   cacheSet(cacheKey, out, TTL.like);
   return out;
 }
 
 async function likedIds(uid) {
-  const res = await net.plain('/api/song/like/get', { uid });
-  net.assertOk(res.json, '喜欢列表');
-  return Array.isArray(res.json.ids) ? res.json.ids.map((x) => sid(x)).filter(Boolean) : [];
+  const json = await eapiJson('song/like/get', { uid }, '喜欢列表');
+  return Array.isArray(json.ids) ? json.ids.map((x) => sid(x)).filter(Boolean) : [];
 }
 
 async function likedPlaylistId(uid) {
@@ -203,6 +266,22 @@ async function likeSet(args) {
     const ids = await likedIds(session.uid);
     return (ids.indexOf(id) >= 0) === expected;
   };
+
+  try {
+    await eapiClient.eapi('radio/like', {
+      alg: 'itembased',
+      trackId: id,
+      like: expected ? 'true' : 'false',
+      time: '3',
+    }, { what: expected ? '喜欢' : '取消喜欢' });
+    attempts.push({ api: 'eapi-radio', code: 200 });
+    if (await verify()) {
+      clearCaches();
+      return null;
+    }
+  } catch (e) {
+    attempts.push({ api: 'eapi-radio', error: e.message, code: e.code });
+  }
 
   await tryLikeRequest(
     'radio',
